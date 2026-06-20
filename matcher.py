@@ -9,7 +9,9 @@
 MCPサーバ(verify_songs)はこれを呼ぶ薄いラッパーになる。
 """
 import csv
+import os
 import re
+import sqlite3
 import unicodedata
 from rapidfuzz import fuzz
 
@@ -29,17 +31,51 @@ def normalize(text: str) -> str:
 
 
 class SongMatcher:
-    def __init__(self, csv_path: str):
-        self.songs = []
-        with open(csv_path, encoding="utf-8-sig") as f:
-            for r in csv.DictReader(f):
-                r["_ntitle"] = normalize(r["title"])
-                r["_nartist"] = normalize(r["artist"])
-                self.songs.append(r)
+    def __init__(self, path: str):
+        """path が .db なら SQLite、それ以外は CSV としてロードする。
+
+        どちらの経路でも self.songs は各曲 dict（_ntitle/_nartist 付き）のリストになり、
+        ファジー照合のロジックは共通。完全一致は self.exact のインメモリ索引で引く。
+        """
+        if path.endswith(".db") or (os.path.exists(path) and self._is_sqlite(path)):
+            self.songs = self._load_sqlite(path)
+        else:
+            self.songs = self._load_csv(path)
         # 完全一致用インデックス
         self.exact = {}
         for s in self.songs:
             self.exact.setdefault((s["_ntitle"], s["_nartist"]), s)
+
+    @staticmethod
+    def _is_sqlite(path: str) -> bool:
+        with open(path, "rb") as f:
+            return f.read(16) == b"SQLite format 3\x00"
+
+    @staticmethod
+    def _load_csv(csv_path: str):
+        songs = []
+        with open(csv_path, encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                r["_ntitle"] = normalize(r["title"])
+                r["_nartist"] = normalize(r["artist"])
+                songs.append(r)
+        return songs
+
+    @staticmethod
+    def _load_sqlite(db_path: str):
+        # 正規化済み列(ntitle/nartist)を読み出すので起動時の再正規化が不要
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        songs = []
+        for row in con.execute(
+            "SELECT song_id, title, artist, genre, release_year, ntitle, nartist FROM songs"
+        ):
+            d = dict(row)
+            d["_ntitle"] = d.pop("ntitle")
+            d["_nartist"] = d.pop("nartist")
+            songs.append(d)
+        con.close()
+        return songs
 
     def match_one(self, title: str, artist: str, limit: int = 3):
         nt, na = normalize(title), normalize(artist)
@@ -86,8 +122,9 @@ if __name__ == "__main__":
     import json
     import time
 
-    m = SongMatcher("/home/claude/test_songs_final.csv")
-    print(f"DB: {len(m.songs)}曲ロード完了")
+    db = "data/songs.db" if os.path.exists("data/songs.db") else "data/test_songs_final.csv"
+    m = SongMatcher(db)
+    print(f"DB({db}): {len(m.songs)}曲ロード完了")
 
     # 表記ゆれを含むテスト候補（LLMが出しそうな揺れを再現）
     test_candidates = [

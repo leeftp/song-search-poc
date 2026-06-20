@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>うたレコ — 気分で選ぶカラオケ提案</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body { height: 100%; }
+    .msg-enter { animation: rise .18s ease-out; }
+    @keyframes rise { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: none;} }
+    .typing span { animation: blink 1.2s infinite; }
+    .typing span:nth-child(2){ animation-delay:.2s } .typing span:nth-child(3){ animation-delay:.4s }
+    @keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
+    .chat-scroll::-webkit-scrollbar{ width:8px } .chat-scroll::-webkit-scrollbar-thumb{ background:#cbd5e1; border-radius:8px }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800">
+  <div class="mx-auto max-w-2xl h-screen flex flex-col">
+
+    <!-- Header -->
+    <header class="flex items-center gap-3 px-4 py-3 bg-white border-b border-slate-200 shadow-sm">
+      <div class="w-9 h-9 rounded-xl bg-indigo-600 text-white grid place-items-center text-lg">♪</div>
+      <div class="flex-1">
+        <h1 class="font-semibold leading-tight">うたレコ</h1>
+        <p class="text-xs text-slate-500 leading-tight">気分を伝えると歌える曲を提案します</p>
+      </div>
+      <select id="model" class="text-sm border border-slate-300 rounded-lg px-2 py-1.5 bg-white">
+        <option value="gpt-5.4-mini">gpt-5.4-mini</option>
+        <option value="claude-haiku-4-5" selected>claude-haiku-4-5</option>
+        <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+      </select>
+      <button id="openSettings" title="設定" class="w-9 h-9 grid place-items-center rounded-lg hover:bg-slate-100 text-slate-600">⚙</button>
+    </header>
+
+    <!-- Messages -->
+    <main id="chat" class="chat-scroll flex-1 overflow-y-auto px-4 py-4 space-y-3"></main>
+
+    <!-- Composer -->
+    <footer class="px-3 py-3 bg-white border-t border-slate-200">
+      <div class="flex items-end gap-2">
+        <button id="mic" title="音声入力" class="shrink-0 w-11 h-11 rounded-full border border-slate-300 text-slate-600 grid place-items-center active:scale-95 transition">🎤</button>
+        <textarea id="input" rows="1" placeholder="今の気分や歌いたい雰囲気を入力…（例: 雨の日にしっとり泣ける曲）"
+          class="flex-1 resize-none max-h-32 border border-slate-300 rounded-2xl px-4 py-2.5 text-[15px] focus:outline-none focus:ring-2 focus:ring-indigo-400"></textarea>
+        <button id="send" class="shrink-0 w-11 h-11 rounded-full bg-indigo-600 text-white grid place-items-center disabled:opacity-40 active:scale-95 transition">➤</button>
+      </div>
+      <p id="hint" class="text-[11px] text-slate-400 mt-1.5 px-1">🎤で音声入力できます。曲は楽曲DBに実在するものだけ提案します。</p>
+    </footer>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settings" class="hidden fixed inset-0 z-20 bg-black/40 grid place-items-center p-4">
+    <div class="bg-white w-full max-w-md rounded-2xl shadow-xl p-5 space-y-4">
+      <div class="flex items-center justify-between">
+        <h2 class="font-semibold text-lg">APIキー設定</h2>
+        <button id="closeSettings" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+      </div>
+      <p class="text-xs text-slate-500">キーはサーバ側にのみ保存され、画面には戻りません（確認はマスク表示）。</p>
+      <div class="space-y-3">
+        <label class="block">
+          <span class="text-sm font-medium">OpenAI <span id="st-openai" class="text-xs text-slate-400"></span></span>
+          <input data-prov="openai" type="password" placeholder="sk-..." class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+        </label>
+        <label class="block">
+          <span class="text-sm font-medium">Gemini <span id="st-gemini" class="text-xs text-slate-400"></span></span>
+          <input data-prov="gemini" type="password" placeholder="AIza..." class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+        </label>
+        <label class="block">
+          <span class="text-sm font-medium">Anthropic <span id="st-anthropic" class="text-xs text-slate-400"></span></span>
+          <input data-prov="anthropic" type="password" placeholder="sk-ant-..." class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+        </label>
+      </div>
+      <button id="saveKeys" class="w-full bg-indigo-600 text-white rounded-lg py-2.5 font-medium active:scale-[.99]">保存</button>
+      <p id="keyMsg" class="text-sm text-center"></p>
+    </div>
+  </div>
+
+  <script>
+    const API = location.origin;
+    const chat = document.getElementById("chat");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+
+    // user_id / session_id を localStorage に永続化（ユーザごとの履歴・好み学習に使う）
+    let userId = localStorage.getItem("uta_user_id");
+    if (!userId) { userId = "u-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("uta_user_id", userId); }
+    let sessionId = localStorage.getItem("uta_session_id") || null;
+
+    function esc(s){ return s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+    function bubble(role, html){
+      const wrap = document.createElement("div");
+      wrap.className = "msg-enter flex " + (role === "user" ? "justify-end" : "justify-start");
+      const b = document.createElement("div");
+      b.className = role === "user"
+        ? "max-w-[82%] bg-indigo-600 text-white rounded-2xl rounded-br-md px-4 py-2.5 text-[15px] whitespace-pre-wrap"
+        : "max-w-[82%] bg-white border border-slate-200 rounded-2xl rounded-bl-md px-4 py-2.5 text-[15px] whitespace-pre-wrap";
+      b.innerHTML = html;
+      wrap.appendChild(b);
+      chat.appendChild(wrap);
+      chat.scrollTop = chat.scrollHeight;
+      return b;
+    }
+
+    function songCards(songs){
+      if (!songs || !songs.length) return "";
+      // バッジ = 楽曲DBとの「照合一致度」（おすすめ度ではない）
+      const confMeta = c => ({
+        high:   ["一致", "bg-emerald-100 text-emerald-700"],
+        medium: ["近い", "bg-amber-100 text-amber-700"],
+      }[c] || [c || "", "bg-slate-100 text-slate-600"]);
+      return `<div class="mt-1.5 space-y-1.5">` + songs.map(s => {
+        const [label, cls] = confMeta(s.confidence);
+        const q = encodeURIComponent(`${s.title} ${s.artist}`);
+        const yt = `https://www.youtube.com/results?search_query=${q}`;
+        const sp = `https://open.spotify.com/search/${q}`;
+        return `
+        <div class="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
+          <span class="flex-1 min-w-0 truncate text-sm"><span class="font-medium">${esc(s.title)}</span><span class="text-slate-500"> · ${esc(s.artist)}</span></span>
+          <a href="${yt}" target="_blank" rel="noopener" title="YouTubeで検索" class="shrink-0 text-[11px] text-rose-600 hover:underline">YouTube</a>
+          <a href="${sp}" target="_blank" rel="noopener" title="Spotifyで検索" class="shrink-0 text-[11px] text-emerald-600 hover:underline">Spotify</a>
+          <span class="text-[10px] font-mono text-slate-400 shrink-0 hidden sm:inline">${esc(s.song_id)}</span>
+          <span title="楽曲DBとの照合一致度（おすすめ度ではありません）" class="text-[10px] px-1.5 py-0.5 rounded shrink-0 ${cls}">${esc(label)}</span>
+        </div>`; }).join("") + `</div>`;
+    }
+
+    function typing(){
+      const wrap = document.createElement("div");
+      wrap.className = "flex justify-start"; wrap.id = "typing";
+      wrap.innerHTML = `<div class="bg-white border border-slate-200 rounded-2xl rounded-bl-md px-4 py-3 typing text-slate-400"><span>●</span><span>●</span><span>●</span></div>`;
+      chat.appendChild(wrap); chat.scrollTop = chat.scrollHeight;
+    }
+    function clearTyping(){ document.getElementById("typing")?.remove(); }
+
+    async function send(){
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = ""; input.style.height = "auto";
+      sendBtn.disabled = true;
+      bubble("user", esc(text));
+      typing();
+      try {
+        const res = await fetch(API + "/chat", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ message: text, model: document.getElementById("model").value, session_id: sessionId, user_id: userId })
+        });
+        const data = await res.json();
+        clearTyping();
+        if (!res.ok) { bubble("assistant", `<span class="text-rose-600">⚠ ${esc(data.detail || "エラー")}</span>`); return; }
+        sessionId = data.session_id; localStorage.setItem("uta_session_id", sessionId);
+        const badge = data.type === "clarification"
+          ? `<div class="text-[11px] text-amber-600 mb-1">確認 ${data.clarification_count}/2</div>` : "";
+        bubble("assistant", badge + esc(data.message) + songCards(data.songs));
+      } catch (e) {
+        clearTyping();
+        bubble("assistant", `<span class="text-rose-600">⚠ 通信エラー: ${esc(String(e))}</span>`);
+      } finally { sendBtn.disabled = false; input.focus(); }
+    }
+
+    sendBtn.addEventListener("click", send);
+    input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+    input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 128) + "px"; });
+
+    // ---- 音声入力（ブラウザの Web Speech API。Chrome/Edge対応、ja-JP） ----
+    const micBtn = document.getElementById("mic");
+    const hint = document.getElementById("hint");
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      micBtn.disabled = true; micBtn.classList.add("opacity-40");
+      micBtn.title = "このブラウザは音声入力に未対応（Chrome/Edge推奨）";
+    } else {
+      const rec = new SR();
+      // continuous=true で、ポーズが入っても手動停止するまで聞き続ける（途中で切れない）
+      rec.lang = "ja-JP"; rec.interimResults = true; rec.continuous = true;
+      let listening = false, base = "", finalText = "", manualStop = false;
+      const idleHint = "🎤で音声入力できます。曲は楽曲DBに実在するものだけ提案します。";
+      micBtn.addEventListener("click", () => {
+        if (listening) { manualStop = true; rec.stop(); return; }  // もう一度押すと停止
+        manualStop = false; finalText = "";
+        base = input.value ? input.value.trimEnd() + " " : "";
+        try { rec.start(); } catch (_) {}
+      });
+      rec.onstart = () => { listening = true; micBtn.classList.add("bg-rose-100","border-rose-300","animate-pulse"); hint.textContent = "🎙 聞き取り中…もう一度押すと停止"; };
+      rec.onend = () => {
+        // 手動停止でなければ自動再開（無音での自動終了で途中切れしないように）
+        if (!manualStop) { try { rec.start(); return; } catch (_) {} }
+        listening = false; micBtn.classList.remove("bg-rose-100","border-rose-300","animate-pulse"); hint.textContent = idleHint; input.focus();
+      };
+      rec.onerror = (e) => {
+        if (e.error === "no-speech" || e.error === "aborted") return;  // 自動再開に任せる
+        manualStop = true;
+        hint.textContent = "音声入力エラー: " + e.error + (e.error === "not-allowed" ? "（マイク許可が必要）" : "");
+      };
+      rec.onresult = (e) => {
+        let interim = "";
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          if (r.isFinal) finalText += r[0].transcript; else interim += r[0].transcript;
+        }
+        input.value = base + finalText + interim;
+        input.dispatchEvent(new Event("input"));
+      };
+    }
+
+    // ---- 設定パネル ----
+    const settings = document.getElementById("settings");
+    async function refreshKeyStatus(){
+      try {
+        const r = await fetch(API + "/config/keys"); const d = await r.json();
+        for (const p of ["openai","gemini","anthropic"]) {
+          const el = document.getElementById("st-" + p);
+          el.textContent = d[p].set ? `（設定済み ${d[p].masked}）` : "（未設定）";
+          el.className = "text-xs " + (d[p].set ? "text-emerald-600" : "text-slate-400");
+        }
+      } catch(_) {}
+    }
+    document.getElementById("openSettings").addEventListener("click", () => { settings.classList.remove("hidden"); refreshKeyStatus(); });
+    document.getElementById("closeSettings").addEventListener("click", () => settings.classList.add("hidden"));
+    settings.addEventListener("click", e => { if (e.target === settings) settings.classList.add("hidden"); });
+
+    document.getElementById("saveKeys").addEventListener("click", async () => {
+      const payload = {};
+      document.querySelectorAll("#settings input[data-prov]").forEach(i => { if (i.value.trim()) payload[i.dataset.prov] = i.value.trim(); });
+      const msg = document.getElementById("keyMsg");
+      if (!Object.keys(payload).length) { msg.textContent = "入力されたキーがありません"; msg.className = "text-sm text-center text-slate-500"; return; }
+      const r = await fetch(API + "/config/keys", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+      const d = await r.json();
+      msg.textContent = d.message; msg.className = "text-sm text-center text-emerald-600";
+      document.querySelectorAll("#settings input[data-prov]").forEach(i => i.value = "");
+      refreshKeyStatus();
+    });
+
+    // 初期メッセージ
+    bubble("assistant", "こんにちは！いまの気分や、歌いたいシーンを教えてください。\nうまく伝わらないときは何度か聞き返します（最大2回）。");
+    refreshKeyStatus();
+  </script>
+</body>
+</html>
