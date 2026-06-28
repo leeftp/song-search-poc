@@ -58,7 +58,7 @@ MODEL_REGISTRY = {
     "claude-haiku-4-5": ("anthropic", "claude-haiku-4-5"),
     "gemini-3.1-flash-lite": ("gemini", "gemini-3.1-flash-lite"),
 }
-DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
 
 def get_adapter(model_key: str):
@@ -90,6 +90,11 @@ class ChatRequest(BaseModel):
     model: str = DEFAULT_MODEL
     session_id: Optional[str] = None
     user_id: str = "anonymous"
+    mood_tag: Optional[str] = None    # デモ用の状況選択（枠外UI）: 気分
+    emotion: Optional[str] = None     # 感情
+    region: Optional[str] = None      # 地域
+    group_size: Optional[str] = None  # 人数
+    age_group: Optional[str] = None   # 年代
 
 
 class ConfigKeysRequest(BaseModel):
@@ -102,10 +107,21 @@ class VerifyRequest(BaseModel):
     candidates: list[dict]
 
 
+class SelectSongRequest(BaseModel):
+    user_id: str
+    song_id: str
+    title: str
+    artist: str
+    genre: str = ""
+
+
 # ========== エンドポイント ==========
 @app.get("/")
 async def root():
-    return FileResponse(str(static_dir / "index.html"))
+    return FileResponse(
+        str(static_dir / "index.html"),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/health")
@@ -135,11 +151,19 @@ async def chat(req: ChatRequest):
     # 過去の好みヒント（次回推薦に活かす）
     profile_hint = profile_store.profile_hint(req.user_id)
 
+    # 枠外UI（気分・感情・地域・人数・年代）で選択された状況ヒント
+    situation = [
+        ("気分", req.mood_tag), ("感情", req.emotion), ("地域", req.region),
+        ("人数", req.group_size), ("年代", req.age_group),
+    ]
+    bits = [f"{label}:{v}" for label, v in situation if v]
+    context_hint = ("## ユーザーが選択した状況\n" + "、".join(bits)) if bits else ""
+
     # 1回のLLM呼び出しで「曖昧判定＋気分＋候補」を取得
     try:
         result = await analyze(
             adapter, real_model, session.messages,
-            session.clarification_count, profile_hint,
+            session.clarification_count, profile_hint, context_hint,
         )
     except Exception as e:  # noqa: BLE001  認証エラー・レート制限・モデル名誤り等を整形して返す
         raise HTTPException(status_code=502, detail=f"LLM呼び出しに失敗しました: {e}")
@@ -161,18 +185,31 @@ async def chat(req: ChatRequest):
         }
 
     # --- 楽曲提案分岐: 候補を楽曲DBと照合（DB外は落とす） ---
-    songs = get_songdb().resolve_candidates(result["candidates"])
+    RECOMMEND_COUNT = 5
+    songs = get_songdb().resolve_candidates(result["candidates"])[:RECOMMEND_COUNT]
+    is_direct = result["request_type"] == "direct"
 
     if songs:
         profile_store.record_recommendations(req.user_id, songs)
-        lines = "、".join(f"{s['title']}（{s['artist']}）" for s in songs[:3])
-        reply = f"{result['mood']}\nこの気分なら、こんな曲はどうでしょう: {lines} など。"
+        lines = "、".join(f"{s['title']}（{s['artist']}）" for s in songs)
+        if is_direct:
+            if len(songs) == 1:
+                s = songs[0]
+                reply = f"「{s['title']}」（{s['artist']}）ですね！いい曲です、ぜひ楽しんでください♪"
+            else:
+                reply = f"ご希望の曲が見つかりました！{lines}、どれも素敵ですよ♪"
+        else:
+            reply = f"{result['mood']}\nこの気分なら、こんな曲はどうでしょう: {lines}"
     else:
-        reply = (
-            f"{result['mood']}\n"
-            "ぴったりの曲を楽曲DB内で見つけられませんでした。"
-            "もう少しイメージ（年代・ジャンル・アーティストなど）を教えてください。"
+        # DB内に一致なし → 今週のヒット曲ランキングをフォールバック表示
+        songs = get_songdb().weekly_hit_chart(limit=RECOMMEND_COUNT)
+        profile_store.record_recommendations(req.user_id, songs)
+        lines = "、".join(f"{s['rank']}位 {s['title']}（{s['artist']}）" for s in songs)
+        not_found = (
+            "その曲を楽曲DB内で見つけられませんでした。"
+            if is_direct else f"{result['mood']}\nぴったりの曲を楽曲DB内で見つけられませんでした。"
         )
+        reply = f"{not_found}\n代わりに今週のヒット曲ランキングはこちらです: {lines}"
 
     # 確認カウントはリセット（一連の意図が解決したとみなす）
     session.clarification_count = 0
@@ -201,6 +238,13 @@ async def songs_search(title: str, artist: str = "", limit: int = 3):
 async def songs_verify(req: VerifyRequest):
     """MCPツール verify_songs と同一インターフェース。"""
     return get_songdb().verify(req.candidates)
+
+
+@app.post("/songs/select")
+async def songs_select(req: SelectSongRequest):
+    """おすすめ楽曲リストからユーザが選んだ（＝歌った）曲を歌唱履歴に記録する。"""
+    profile_store.record_sing(req.user_id, req.model_dump())
+    return {"message": f"「{req.title}」を歌唱履歴に記録しました"}
 
 
 # ---- APIキー設定 ----

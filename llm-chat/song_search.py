@@ -25,6 +25,21 @@ DEFAULT_DB_PATH = os.getenv(
 # DB外の曲を返さないため、この信頼度以上の照合のみ採用する
 ACCEPT_CONFIDENCE = {"high", "medium"}
 
+# 楽曲DBに人気度/ランキングの列が無いため、検索結果が0件のときのフォールバック用に
+# 暫定の人気曲リストを順位付きで保持する（本番では実チャートAPIに差し替え想定）。
+FALLBACK_HIT_CHART = [
+    {"title": "Lemon", "artist": "米津玄師"},
+    {"title": "Pretender", "artist": "Official髭男dism"},
+    {"title": "夜に駆ける", "artist": "YOASOBI"},
+    {"title": "マリーゴールド", "artist": "あいみょん"},
+    {"title": "白日", "artist": "King Gnu"},
+    {"title": "インフェルノ", "artist": "Mrs. GREEN APPLE"},
+    {"title": "クリスマスソング", "artist": "back number"},
+    {"title": "糸", "artist": "中島みゆき"},
+    {"title": "チェリー", "artist": "スピッツ"},
+    {"title": "丸ノ内サディスティック", "artist": "椎名林檎"},
+]
+
 
 class SongDB:
     """楽曲DBへの唯一の入口。内部で matcher を持つ。"""
@@ -65,6 +80,21 @@ class SongDB:
                 if cur is None or best["score"] > cur["score"]:
                     resolved[best["song_id"]] = best
         return sorted(resolved.values(), key=lambda s: -s["score"])
+
+    def weekly_hit_chart(self, limit: int = 5) -> list[dict]:
+        """検索結果が0件のときのフォールバック。固定リストをランキング順で返す。
+
+        返り値: [{song_id, title, artist, score, confidence, rank}] （rank昇順）
+        """
+        verified = self.verify(FALLBACK_HIT_CHART)
+        chart = []
+        for r in verified["results"]:
+            best = r["matches"][0] if r["matches"] else None
+            if best and best["confidence"] in ACCEPT_CONFIDENCE:
+                chart.append(best)
+        for rank, song in enumerate(chart[:limit], start=1):
+            song["rank"] = rank
+        return chart[:limit]
 
 
 # シングルトン（起動時に1回だけDBをロード）

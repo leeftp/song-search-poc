@@ -105,6 +105,8 @@ class SongMatcher:
             "song_id": s["song_id"],
             "title": s["title"],
             "artist": s["artist"],
+            "genre": s.get("genre", ""),
+            "release_year": s.get("release_year", ""),
             "score": round(score, 1),
             "confidence": conf,
         }

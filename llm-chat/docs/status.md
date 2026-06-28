@@ -2,6 +2,82 @@
 
 うたレコ（llm-chat）＋ song-search-poc 拡張の実装サマリと、残課題の記録。
 
+---
+
+## 2026-06-26 実施内容
+
+### プロンプト・推薦ロジック改善
+
+#### request_type 判定（direct / mood）
+- `clarification.py` システムプロンプトを改修。入力を "direct"（曲名・歌手名の直接言及）と "mood"（気分・シーン探索）に分類。
+- direct の場合: 気分推測を省き、言及された曲を最優先候補として返す。
+- LLM の JSON 出力スキーマに `request_type` フィールドを追加（欠落時は "mood" にフォールバック）。
+- direct の返信文を温和に改善: 1曲ヒット → `「○○」（△△）ですね！いい曲です、ぜひ楽しんでください♪` / 複数ヒット → `ご希望の曲が見つかりました！…どれも素敵ですよ♪`
+
+#### 楽曲返却数を5件に統一
+- `main.py` で `resolve_candidates()[:5]`（`RECOMMEND_COUNT = 5`）に統一。
+
+#### 次の5曲（繰り返し回避）
+- プロンプトに「直前の提案曲をユーザーが選ばずに会話を続けている場合は同じ曲を繰り返さない」ルールを追加。会話履歴をもとに LLM が自動判断。
+
+#### 0件時フォールバック（暫定ヒットチャート）
+- `song_search.py` に `FALLBACK_HIT_CHART`（DB実在確認済み10曲、順位付き）と `weekly_hit_chart()` を追加。
+- DB 照合で0件の場合、「今週のヒット曲ランキング」として1〜5位を表示。
+- 本番では実チャート API への差し替えを想定（コメント明記）。
+
+#### デフォルトモデルを Gemini に変更
+- `main.py` の `DEFAULT_MODEL` と `index.html` の `<select>` の `selected` 属性を `gemini-3.1-flash-lite` に変更。
+
+---
+
+### デモ用画面の大幅改修（index.html）
+
+#### 状況フィルター（チャット枠外）
+- ヘッダー下に気分 / 感情 / 地域 / 人数 / 年代 の5つのセレクトボックスを追加。
+- 選択値は `/chat` リクエストに同送（`mood_tag` / `emotion` / `region` / `group_size` / `age_group`）。
+- `main.py` でビット文字列 `context_hint` を組み立て、`clarification.py` のシステムプロンプトに注入。LLM が曖昧さの判断材料として活用（確認質問のスキップ基準にも反映）。
+- フィルター選択時にボーダーがインディゴ色に変わり「アクティブ」を視覚表示。送信時にユーザーバブルへフィルタータグを表示（適用を明示）。
+
+#### 2カラムレイアウト（PC幅）
+- 左列: チャット（ヘッダー＋フィルター＋会話＋入力欄）。
+- 右列: **楽曲リンクパネル**（YouTube / Spotify リンクのみ表示）。モバイルはチャット下に折り返し。
+
+#### 楽曲カード（チャット内）でタップ選択
+- 楽曲カードはチャットバブル内に表示（YouTube/Spotify リンクは右パネルへ分離）。
+- カード全体をタップ = 歌唱履歴に記録。緑色ハイライト＋「✓」で選択済みを表示。
+- チャットに `「○○」を再生します。` メッセージを追加表示。
+
+#### 音声入力の自動送信
+- `continuous: true`（手動停止まで聞き続ける）→ `continuous: false`（発話後の無音で自動終了）に変更。
+- `rec.onend` で `finalText` が存在する場合、自動的に `send()` を呼び出してサーバに送信。手動停止（再度マイクボタン押下）の場合は送信しない。
+
+#### ブラウザキャッシュ対策
+- `/` エンドポイントの `FileResponse` に `Cache-Control: no-store` を追加。Windows Chrome など LAN 接続端末での旧 JS キャッシュ問題を解消。
+
+---
+
+### 歌唱履歴機能（DB）
+
+#### sing_history テーブル
+- `user_profile.py` の DDL に `sing_history`（id / user_id / song_id / title / artist / genre / ts）と索引を追加。
+- `liked_songs`（推薦提示の全曲を加点）とは分離し、**ユーザーが明示的に選択した曲だけ**を記録する強いシグナルとして設計。
+
+#### POST /songs/select エンドポイント
+- `main.py` に追加。フロントがカードタップ時に呼び出し、`profile_store.record_sing()` を経由して `sing_history` に INSERT。
+
+#### 歌唱履歴の要約と推薦への反映
+- `singing_summary()` を追加: `sing_history` から好みジャンル・歌手を集計し短い日本語テキストを生成。
+- `profile_hint()` を拡張: 既存の `top_artists`（提示曲ベース）に `singing_summary`（選択曲ベース）を追記し、次回推薦のシステムプロンプトに反映。
+
+---
+
+### その他改修
+
+- `matcher.py` `_fmt()`: 返却 dict に `genre` / `release_year` を追加（`sing_history` 保存・将来のジャンル絞り込みに利用）。
+- 楽曲カード間の余白を `space-y-0` に詰めて一覧の視認性を向上。
+
+---
+
 ## 対応内容（実装済み）
 
 ### 評価キット（song-search-poc 本体）
