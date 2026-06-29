@@ -11,6 +11,7 @@ class OpenAIAdapter(LLMAdapter):
         response = await self.client.chat.completions.create(
             model=model,
             messages=messages,
+            tools=[{"type": "web_search_preview"}],
         )
         return response.choices[0].message.content or ""
 

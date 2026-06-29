@@ -4,69 +4,70 @@ from .base import LLMAdapter
 
 class GeminiAdapter(LLMAdapter):
     def __init__(self, api_key: str):
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        self._genai = genai
+        from google import genai
+        from google.genai import types
+        self.types = types
+        self.client = genai.Client(api_key=api_key)
 
-    def _to_gemini_messages(self, messages: list[dict]) -> tuple[str, list]:
-        """OpenAI形式のメッセージをGemini形式に変換"""
-        system_prompt = ""
-        history = []
-        last_user_msg = ""
-
+    def _build_contents(self, messages: list[dict]):
+        """OpenAI形式のメッセージをgoogle.genai形式に変換する。"""
+        types = self.types
+        contents = []
         for msg in messages:
             role = msg["role"]
-            content = msg["content"]
             if role == "system":
-                system_prompt = content
-            elif role == "user":
-                last_user_msg = content
-                if history and history[-1]["role"] == "user":
-                    history.append({"role": "model", "parts": ["..."]})
-                history.append({"role": "user", "parts": [content]})
-            elif role == "assistant":
-                history.append({"role": "model", "parts": [content]})
+                continue  # system はGenerateContentConfigのsystem_instructionで渡す
+            genai_role = "model" if role == "assistant" else "user"
+            contents.append(
+                types.Content(role=genai_role, parts=[types.Part(text=msg["content"])])
+            )
+        return contents
 
-        # 最後のユーザーメッセージをhistoryから除く（chat.send_messageで送るため）
-        if history and history[-1]["role"] == "user":
-            history = history[:-1]
-
-        return system_prompt, history, last_user_msg
+    def _system_prompt(self, messages: list[dict]) -> str:
+        for msg in messages:
+            if msg["role"] == "system":
+                return msg["content"]
+        return ""
 
     async def chat(self, messages: list[dict], model: str) -> str:
         import asyncio
-        system_prompt, history, last_user_msg = self._to_gemini_messages(messages)
+        types = self.types
+        system = self._system_prompt(messages)
+        contents = self._build_contents(messages)
 
-        generation_config = {}
-        model_obj = self._genai.GenerativeModel(
-            model_name=model,
-            system_instruction=system_prompt if system_prompt else None,
+        config = types.GenerateContentConfig(
+            system_instruction=system or None,
+            max_output_tokens=4096,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
         )
-        chat_session = model_obj.start_chat(history=history)
-
-        # Gemini SDK は同期なので executor で実行
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None, lambda: chat_session.send_message(last_user_msg)
-        )
-        return response.text
-
-    async def chat_stream(self, messages: list[dict], model: str) -> AsyncIterator[str]:
-        import asyncio
-        system_prompt, history, last_user_msg = self._to_gemini_messages(messages)
-
-        model_obj = self._genai.GenerativeModel(
-            model_name=model,
-            system_instruction=system_prompt if system_prompt else None,
-        )
-        chat_session = model_obj.start_chat(history=history)
 
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
-            lambda: chat_session.send_message(last_user_msg, stream=True),
+            lambda: self.client.models.generate_content(
+                model=model, contents=contents, config=config
+            ),
+        )
+        return response.text or ""
+
+    async def chat_stream(self, messages: list[dict], model: str) -> AsyncIterator[str]:
+        import asyncio
+        types = self.types
+        system = self._system_prompt(messages)
+        contents = self._build_contents(messages)
+
+        config = types.GenerateContentConfig(
+            system_instruction=system or None,
+            max_output_tokens=4096,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
         )
 
-        for chunk in response:
-            if chunk.text:
-                yield chunk.text
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: self.client.models.generate_content(
+                model=model, contents=contents, config=config
+            ),
+        )
+        if response.text:
+            yield response.text

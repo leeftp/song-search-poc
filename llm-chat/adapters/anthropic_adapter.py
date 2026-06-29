@@ -20,11 +20,15 @@ class AnthropicAdapter(LLMAdapter):
 
     async def chat(self, messages: list[dict], model: str) -> str:
         system, msgs = self._split_system(messages)
-        kwargs = dict(model=model, max_tokens=4096, messages=msgs)
+        kwargs = dict(
+            model=model, max_tokens=4096, messages=msgs,
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+        )
         if system:
             kwargs["system"] = system
         response = await self.client.messages.create(**kwargs)
-        return response.content[0].text
+        # web_search使用時はcontentが複数ブロックになるため、textブロックのみ結合して返す
+        return "".join(b.text for b in response.content if hasattr(b, "text"))
 
     async def chat_stream(self, messages: list[dict], model: str) -> AsyncIterator[str]:
         system, msgs = self._split_system(messages)
