@@ -8,7 +8,6 @@ class AnthropicAdapter(LLMAdapter):
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
 
     def _split_system(self, messages: list[dict]) -> tuple[str, list[dict]]:
-        """systemメッセージを分離"""
         system = ""
         rest = []
         for msg in messages:
@@ -35,7 +34,6 @@ class AnthropicAdapter(LLMAdapter):
         kwargs = dict(model=model, max_tokens=4096, messages=msgs)
         if system:
             kwargs["system"] = system
-
         async with self.client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
                 yield text
